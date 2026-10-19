@@ -1,0 +1,95 @@
+project:
+  name: XAJ with Cryosphere
+  description: 新安江模型 + 冰冻圈模块（积雪、冰川、冻土）
+  version: '2.0'
+basins:
+- name: hhy
+  enabled: true
+  description: Yellow headwaters basin
+  weight: 1.0
+  role: both
+  selected_gauges:
+  - maqu
+  - tangnaihai
+  time:
+    train_years:
+    - 2000
+    - 2001
+    - 2002
+    - 2003
+    - 2004
+    - 2005
+    - 2006
+    - 2007
+    - 2008
+    - 2009
+    - 2010
+    - 2011
+    - 2012
+    valid_years:
+    - 2013
+    - 2014
+    - 2015
+    test_years:
+    - 2016
+    - 2017
+    - 2018
+    - 2019
+    warmup_days: 365
+multi_basin:
+  training_strategy: mixed
+mode: subbasin
+model:
+  cold_region:
+    enabled: true
+    adjust_et: false
+    t_snow: 0.0
+    t_melt: 0.0
+    ddf_snow: 3.0
+    ddf_ice: 6.0
+  precip_correct:
+    enabled: true
+    kp: 1.0
+  evaporation:
+    use_input: true
+    pet_method: hargreaves
+  components:
+    subbasin_runoff:
+      model: xaj
+      param_mode:
+        category: dl
+        strategy: scratch
+    river_routing:
+      model: muskingum
+      param_mode:
+        category: dl
+        strategy: scratch
+training:
+  seed: 42
+  learning_rate: 0.01
+  epochs: 500
+  valid_interval: 1
+  use_gpu: false
+  output_dir: results/three_schemes/scheme1_separate/hhy_only/xaj/train
+  early_stopping:
+    enabled: true
+    patience: 30
+    min_delta: 0.001
+  lr_scheduler:
+    enabled: true
+    type: reduce_on_plateau
+    factor: 0.5
+    patience: 10
+  objective: KGE
+  kge_mode: yearly
+network:
+  hidden_layers:
+  - 64
+  - 32
+  dropout: 0.1
+  use_batchnorm: true
+simulation:
+  output_dir: results/compare_models_js/xaj_cold/simulation
+  save_physical_processes: true
+  start_date: null
+  end_date: null

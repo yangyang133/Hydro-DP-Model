@@ -1,0 +1,303 @@
+# ==============================================================================
+# 主配置模板（与当前 train.py / simulate.py 入口一致）
+# ------------------------------------------------------------------------------
+# 这份文件的注释尽量列出当前代码里已经支持的可选值和常用写法。
+# 如果某个字段写了“当前实现仅支持...”，表示代码里虽然可能预留了接口，
+# 但主训练入口的稳定可用选项目前以这里为准。
+#
+# 数据目录约定：
+#   data/<basin_name>/
+#     dl_input/               # basin.csv, river.csv, hillslope.csv（按模式选用）
+#     forcing/                # P.csv, E.csv, T.csv
+#     model_attr/model_attr.json
+#     observation/Q.csv
+#     params/                 # traditional/manual 或 fixed 参数文件
+#
+# 常用流域名：
+#   js   -> 长江源
+#   hhy  -> 黄河源
+# ==============================================================================
+
+# ==============================================================================
+# 项目信息
+# ==============================================================================
+project:
+  name: "Distributed Hydrological Model"
+  description: "Default config for Yellow headwaters with subbasin XAJ"
+  version: "2.1"
+
+
+# ==============================================================================
+# 流域列表
+# ------------------------------------------------------------------------------
+# 单流域：只启用 1 个 basin
+# 多流域：启用多个 basin，train.py 自动进入 multi-basin 训练
+#
+# basins[].role 可选：
+#   - both   : 同时参与训练和验证（默认、最常用）
+#   - train  : 只参与训练
+#   - valid  : 只参与验证
+# 这个字段对三方案批处理尤其有用。
+#
+# basins[].time 下的模拟时段优先级（simulate.py）：
+#   1. simulation.start_date / simulation.end_date
+#   2. basins[].time.simulate_start_date / simulate_end_date
+#   3. basins[].time.simulate_years
+#   4. train_years + valid_years 的并集回退
+# ==============================================================================
+basins:
+  - name: "yj8"                  # 必填；对应 data/hhy/
+    enabled: true                # 可选：true / false
+    description: "yj8 headwaters basin"
+    weight: 1.0                  # 多流域训练时的损失权重
+    role: "both"                 # 可选：both / train / valid
+    time:
+      train_years: [2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021]
+      valid_years: [2022, 2023, 2024]
+      warmup_days: 365           # 常用：365；寒区可按需要增大
+      simulate_start_date: null  # 可选：YYYY-MM-DD；如 "2017-01-01"
+      simulate_end_date: null    # 可选：YYYY-MM-DD；如 "2019-12-31"
+      simulate_years: []         # 可选：如 [2017, 2018]；为空表示不用这个入口
+
+  # 多流域示例：
+  # - name: "js"
+  #   enabled: true
+  #   description: "Yangtze headwaters basin"
+  #   weight: 1.0
+  #   role: "both"               # both / train / valid
+  #   time:
+  #     train_years: [2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010, 2011, 2012]
+  #     valid_years: [2013, 2014, 2015, 2016, 2017, 2018, 2019]
+  #     warmup_days: 365
+  #     simulate_start_date: null
+  #     simulate_end_date: null
+  #     simulate_years: []
+
+
+# ==============================================================================
+# 多流域训练策略
+# ------------------------------------------------------------------------------
+# training_strategy 可选：
+#   - sequential : 每个 epoch 依次对每个流域单独前向/反向并更新，较稳
+#   - mixed      : 累积多个流域的梯度后统一更新，通常更快
+# ==============================================================================
+multi_basin:
+  training_strategy: "sequential"
+
+
+# ==============================================================================
+# 运行模式
+# ------------------------------------------------------------------------------
+# mode 可选：
+#   - subbasin : 子流域产流 + 河道汇流
+#   - grid     : 栅格产流 + 坡面汇流 + 河道汇流
+#
+# 注意：
+#   - 当前论文主流程通常使用 subbasin
+#   - traditional / differential_evolution 当前只支持 subbasin
+# ==============================================================================
+mode: "subbasin"
+
+
+# ==============================================================================
+# 模型配置
+# ==============================================================================
+model:
+  # ---------------------------------------------------------------------------
+  # 冰冻圈模块
+  # ---------------------------------------------------------------------------
+  cold_region:
+    enabled: false                # 可选：true / false
+    adjust_et: false             # 可选：true / false；是否额外按温度调节 ET
+    t_snow: 0.0                  # 降雪温度阈值（°C）
+    t_melt: 0.0                  # 融雪温度阈值（°C）
+    ddf_snow: 3.0                # 积雪度日因子（mm / °C / day）
+    ddf_ice: 6.0                 # 冰川度日因子（mm / °C / day）
+
+  # ---------------------------------------------------------------------------
+  # 降水订正
+  # ---------------------------------------------------------------------------
+  precip_correct:
+    enabled: false               # 可选：true / false
+    kp: 1.0                      # 初值或固定值；启用时参与模型参数体系
+
+  # ---------------------------------------------------------------------------
+  # 蒸发输入
+  # ---------------------------------------------------------------------------
+  evaporation:
+    use_input: true              # true: 直接用 forcing/E.csv；false: 由温度估算 PET
+    pet_method: "hargreaves"     # use_input=false 时生效；可选：hargreaves / priestley_taylor
+
+  # ---------------------------------------------------------------------------
+  # 组件配置
+  # ---------------------------------------------------------------------------
+  # 当前 train.py 的 param_mode 新结构：
+  #   category 可选：
+  #     - dl
+  #     - traditional
+  #
+  #   strategy 可选：
+  #     - 当 category=dl：
+  #         scratch / continue
+  #         兼容别名：from_scratch, resume, continued
+  #     - 当 category=traditional：
+  #         manual / differential_evolution
+  #         兼容别名：manual_calibration, de, differential-evolution
+  #
+  #   重要限制：
+  #     - 同一次 train.py 运行中，active components 应属于同一大类方案
+  #     - 不支持把 dl 与 traditional/differential_evolution 混在一次运行里
+  #     - traditional/manual 表示直接读取固定参数文件，不做优化
+  #     - dl/continue 需要提供 checkpoint_dir
+  #
+  # manual / fixed 参数文件约定（subbasin 模式）：
+  #   data/<basin>/params/<model_name>_params.csv
+  #   data/<basin>/params/muskingum_params.csv
+  #
+  # manual / fixed 参数文件约定（grid 模式）：
+  #   uniform: data/<basin>/params/<model_name>_params.csv
+  #   spatial: data/<basin>/params/grid/<model_name>/<param_name>.tif
+  #
+  components:
+    # -------------------------------------------------------------------------
+    # subbasin 模式下启用：subbasin_runoff + river_routing
+    # -------------------------------------------------------------------------
+    subbasin_runoff:
+      model: "hbv"               # 可选：xaj / gr4j / hbv / sacsma / tank
+      param_mode:
+        category: "dl"           # 可选：dl / traditional
+        strategy: "scratch"      # dl: scratch / continue；traditional: manual / differential_evolution
+        # checkpoint_dir: "results/your_previous_run/train"  # 仅 dl/continue 时必填
+
+    # -------------------------------------------------------------------------
+    # grid 模式下启用：grid_runoff + hillslope_routing + river_routing
+    # -------------------------------------------------------------------------
+    grid_runoff:
+      model: "sphy"              # 可选：sphy / vic / xaj_grid
+      param_mode:
+        category: "dl"           # 可选：dl / traditional
+        strategy: "scratch"      # grid 模式下若走 manual，通常与 param_source 配合
+        # checkpoint_dir: "results/your_previous_run/train"
+      param_source: "uniform"    # 仅固定参数时有意义；可选：uniform / spatial
+
+    hillslope_routing:
+      model: "d8_travel_time"    # 当前实现的稳定选项：d8_travel_time
+      param_mode:
+        category: "dl"           # 可选：dl / traditional
+        strategy: "scratch"      # 可选：scratch / continue / manual / differential_evolution
+        # checkpoint_dir: "results/your_previous_run/train"
+
+    river_routing:
+      model: "muskingum"         # 当前主训练/模拟流程的稳定选项：muskingum
+      param_mode:
+        category: "dl"           # 可选：dl / traditional
+        strategy: "scratch"      # 可选：scratch / continue / manual / differential_evolution
+        # checkpoint_dir: "results/your_previous_run/train"
+      # 仅 manual/fixed 时常用；按 reach_id 指定默认 Muskingum 参数
+      # muskingum_params:
+      #   1001: {K: 1.0, X: 0.2}
+      #   1002: {K: 1.5, X: 0.2}
+
+
+# ==============================================================================
+# 训练配置
+# ------------------------------------------------------------------------------
+# objective：
+#   - 当前 train.py 仅实现 KGE 目标，因此这里应保持 "KGE"
+#
+# kge_mode 可选：
+#   - series : 整段时间序列算一个 KGE
+#   - yearly : 逐年计算 KGE 再平均（当前论文更常用）
+#
+# training.resume：
+#   - 旧字段，当前主入口不会再使用
+#   - 继续训练请改到各 active component 的 param_mode:
+#       category: dl
+#       strategy: continue
+#       checkpoint_dir: "results/.../train"
+# ==============================================================================
+training:
+  seed: 42
+  learning_rate: 0.0005
+  epochs: 1000
+  valid_interval: 1
+  use_gpu: false                 # 可选：true / false；true 时若 CUDA 可用则使用 GPU
+  output_dir: "results/default_runs/yj8_hbv"
+
+  # 已废弃：保留注释仅用于提醒
+  # resume:
+  #   enabled: false
+  #   path: "results/old_style_resume_path"
+
+  early_stopping:
+    enabled: true                # 可选：true / false
+    patience: 30
+    min_delta: 0.001
+
+  lr_scheduler:
+    enabled: true                # 可选：true / false
+    type: "reduce_on_plateau"    # 当前实现：reduce_on_plateau
+    factor: 0.5
+    patience: 10
+
+  objective: "KGE"               # 当前实现请保持 KGE
+  kge_mode: "yearly"             # 可选：series / yearly
+
+  # 仅当 active components 使用 traditional/differential_evolution 时生效
+  traditional:
+    maxiter: 200                 # 可选：正整数；DE 最大迭代次数
+    popsize: 15                  # 可选：正整数；DE 种群规模
+    mutation: 0.8                # 可选：浮点数；DE 变异因子
+    recombination: 0.7           # 可选：浮点数；DE 交叉概率
+    tol: 0.01                    # 可选：浮点数；停止容差
+    seed: null                   # 可选：整数或 null；null 时沿用 training.seed / 外部默认
+    write_to_data_params: false  # 可选：true / false；是否把结果写回 data/<basin>/params/
+
+
+# ==============================================================================
+# 神经网络配置（仅对 DL 参数学习生效）
+# ------------------------------------------------------------------------------
+# hidden_layers：
+#   - 形如 [64, 32]
+#   - 可改成 [128, 64, 32] 等
+# ==============================================================================
+network:
+  hidden_layers: [64, 32]
+  dropout: 0.0
+  use_batchnorm: true            # 可选：true / false
+
+
+# ==============================================================================
+# 模拟输出配置（simulate.py）
+# ------------------------------------------------------------------------------
+# 默认行为：
+#   - simulation.param_mode: follow_training
+#   - 即直接继承 model.components.*.param_mode 的设置
+#   - dl/scratch 或 dl/continue：从 training.output_dir 读取 *_net.pt
+#   - traditional/manual：从 data/<basin>/params 读取参数 CSV
+#   - traditional/differential_evolution：优先从 training.output_dir/params/<basin>
+#     读取率定后的参数 CSV；若不存在，再回退到 data/<basin>/params
+#
+# start_date / end_date：
+#   - 这里填写时，优先级高于 basins[].time.simulate_start_date/end_date
+#   - 留空则按 basin.time 的 simulate_* 或 train/valid 年份自动推断
+# network_dir：
+#   - 可选；仅 DL 模拟使用
+#   - 留空时默认等于 training.output_dir
+#   - 若你想用另一个训练目录的网络，可填 "results/.../train"
+# params_dir：
+#   - 可选；仅 traditional 模拟使用
+#   - 留空时按上面的默认行为自动选择
+# allow_untrained_networks：
+#   - 默认 false；若网络文件缺失则直接报错，避免误用随机初始化网络
+#   - 仅用于调试时可临时改为 true
+# ==============================================================================
+simulation:
+  param_mode: "follow_training"   # 当前支持：follow_training；默认与训练 param_mode 一致
+  output_dir: "results/default_runs/hhy_xaj/simulation"
+  save_physical_processes: true  # 可选：true / false
+  start_date: null               # 可选：YYYY-MM-DD
+  end_date: null                 # 可选：YYYY-MM-DD
+  network_dir: null              # 可选：DL 网络目录；默认 training.output_dir
+  params_dir: null               # 可选：传统参数 CSV 目录；默认自动推断
+  allow_untrained_networks: false # 可选：true / false；默认缺网络即报错
